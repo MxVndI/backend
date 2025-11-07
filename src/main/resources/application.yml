@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: order-service
+
+  datasource:
+    url: jdbc:postgresql://postgres:5432/order_service
+    username: postgres
+    password: password
+    hikari:
+      maximum-pool-size: 20
+      connection-timeout: 30000
+      idle-timeout: 300000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        show_sql: true
+        format_sql: true
+
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+    url: jdbc:postgresql://postgres:5432/order_service
+    user: postgres
+    password: password
+
+  rabbitmq:
+    host: rabbitmq
+    port: 5672
+    username: guest
+    password: guest
+    orderCreatedQueue: oms.order.created
+    listener:
+      simple:
+        retry:
+          enabled: true
+          max-attempts: 10
+          initial-interval: 3000
+          multiplier: 1.5
+
+server:
+  port: 8080
+
+logging:
+  level:
+    ru.practicum.order_service: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
