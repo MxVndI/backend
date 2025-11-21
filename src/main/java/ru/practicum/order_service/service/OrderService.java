@@ -1,7 +1,5 @@
 package ru.practicum.order_service.service;
 
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.practicum.order_service.dto.OrderCreatedMessage;
@@ -11,8 +9,8 @@ import ru.practicum.order_service.mapper.OrderMessageMapper;
 import ru.practicum.order_service.model.Order;
 import ru.practicum.order_service.model.OrderItem;
 import ru.practicum.order_service.rabbit.RabbitMqPublisher;
-import ru.practicum.order_service.repository.OrderItemRepository;
-import ru.practicum.order_service.repository.OrderRepository;
+import ru.practicum.order_service.repository.OrderDAO;
+import ru.practicum.order_service.repository.OrderItemDAO;
 
 import lombok.RequiredArgsConstructor;
 
@@ -24,45 +22,50 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class OrderService {
 
-    private final OrderRepository orderRepository;
-    private final OrderItemRepository orderItemRepository;
+    private final OrderDAO orderDAO;
+    private final OrderItemDAO orderItemDAO;
     private final OrderMessageMapper orderMessageMapper;
     private final OrderMapper orderMapper;
     private final RabbitMqPublisher rabbitMqPublisher;
 
     @Transactional
     public List<OrderUnit> batchInsert(List<Order> orders) {
-        List<Order> savedOrders = orderRepository.saveAll(orders);
+        orders.forEach(this::validateOrder);
 
-        List<OrderCreatedMessage> messages = savedOrders.stream()
+        orderDAO.saveAll(orders);
+
+        List<OrderItem> allItems = orders.stream()
+                .flatMap(order -> order.getOrderItems().stream())
+                .peek(item -> item.setOrder(item.getOrder()))
+                .toList();
+        orderItemDAO.saveAll(allItems);
+
+        List<OrderCreatedMessage> messages = orders.stream()
                 .map(orderMessageMapper::toOrderCreatedMessage)
                 .toList();
-
         rabbitMqPublisher.publishOrderCreated(messages);
 
-        return orderMapper.toOrderUnitList(savedOrders);
+        return orderMapper.toOrderUnitList(orders);
     }
-
 
     @Transactional(readOnly = true)
     public List<OrderUnit> getOrders(List<Long> ids, List<Long> customerIds,
                                      int page, int pageSize, boolean includeOrderItems) {
-        Pageable pageable = PageRequest.of(page, pageSize);
+        int offset = page * pageSize;
         List<Order> orders;
 
         if (ids != null && !ids.isEmpty()) {
-            if (includeOrderItems) {
-                orders = orderRepository.findByIdInWithItems(ids);
-            } else {
-                orders = orderRepository.findByIdIn(ids, pageable).getContent();
-            }
+            orders = includeOrderItems
+                    ? orderDAO.findByIdInWithItems(ids)
+                    : orderDAO.findByIdIn(ids, pageSize, offset);
         } else if (customerIds != null && !customerIds.isEmpty()) {
-            orders = orderRepository.findByCustomerIds(customerIds, pageable).getContent();
+            orders = orderDAO.findByCustomerIds(customerIds, pageSize, offset);
         } else {
-            orders = orderRepository.findAll(pageable).getContent();
+            orders = orderDAO.findAll(pageSize, offset);
         }
 
-        if (includeOrderItems && (ids == null || ids.isEmpty())) {
+        if (includeOrderItems && !orders.isEmpty() &&
+                (ids == null || ids.isEmpty() || orders.getFirst().getOrderItems().isEmpty())) {
             loadOrderItems(orders);
         }
 
@@ -70,16 +73,25 @@ public class OrderService {
     }
 
     private void loadOrderItems(List<Order> orders) {
-        List<Long> orderIds = orders.stream().map(Order::getId).toList();
-        Map<Long, List<OrderItem>> itemsByOrderId = orderItemRepository.findByOrderIds(orderIds)
-                .stream()
-                .collect(Collectors.groupingBy(oi -> oi.getOrder().getId()));
+        if (orders.isEmpty()) return;
 
-        orders.forEach(order ->
-                order.setOrderItems(itemsByOrderId.getOrDefault(order.getId(), List.of())));
+        List<Long> orderIds = orders.stream().map(Order::getId).toList();
+        Map<Long, List<OrderItem>> itemsByOrderId = orderItemDAO.findByOrderIds(orderIds)
+                .stream()
+                .collect(Collectors.groupingBy(item -> item.getOrder().getId()));
+
+        orders.forEach(order -> {
+            List<OrderItem> items = itemsByOrderId.getOrDefault(order.getId(), List.of());
+            items.forEach(item -> item.setOrder(order));
+            order.setOrderItems(items);
+        });
     }
 
     private void validateOrder(Order order) {
+        if (order.getOrderItems() == null || order.getOrderItems().isEmpty()) {
+            throw new IllegalArgumentException("Order must have at least one OrderItem");
+        }
+
         long calculatedTotal = order.getOrderItems().stream()
                 .mapToLong(item -> item.getPriceCents() * item.getQuantity())
                 .sum();
